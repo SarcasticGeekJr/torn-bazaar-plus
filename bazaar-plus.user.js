@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bazaar Plus
 // @namespace    https://github.com/SarcasticGeekJr/torn-bazaar-plus
-// @version      2.1.0
+// @version      2.2.0
 // @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip profit, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -43,6 +43,7 @@
   const MIN = 60 * 1000;
   const LIST_TTL = 10 * MIN; // full item list (lowest price of every item)
   const ITEM_TTL = 30 * 1000; // one item's listings
+  const LIVE_INTERVAL = 30 * 1000; // Item Market re-check while an item is open
   const MONITOR_INTERVAL = 10 * MIN; // watchlist + undercut check
   const HIGHLIGHT_TTL = 3 * MIN; // how long a "highlight this item" request stays valid
   const HIST_BUCKET = 30 * MIN; // at most one price-history point per item per 30 min
@@ -212,7 +213,10 @@
   async function loadItemMarket(id, force) {
     const d = await torn(`/v2/market/${id}/itemmarket?offset=0`, ITEM_TTL, force);
     const ls = (d.itemmarket && d.itemmarket.listings) || [];
-    return ls.length ? ls.reduce((m, l) => (l.price < m.price ? l : m)) : { price: 0, amount: 0 };
+    const low = ls.length ? ls.reduce((m, l) => (l.price < m.price ? l : m)) : { price: 0, amount: 0 };
+    // Torn serves a cached copy; cache_timestamp says how old it is.
+    const ts = d.itemmarket && d.itemmarket.cache_timestamp ? d.itemmarket.cache_timestamp * 1000 : 0;
+    return { price: low.price, amount: low.amount, at: ts && ts <= Date.now() ? ts : Date.now() };
   }
   // seller id -> is_open, for bazaars Torn lists as selling this item
   async function loadBazaarOpen(id, force) {
@@ -449,6 +453,8 @@
       view.market = undefined;
       view.marketErr = null;
       view.open = null;
+      view.marketChange = null;
+      view.liveErr = false;
       view.info = undefined;
       view.infoErr = null;
       view.infoOpen = false;
@@ -689,7 +695,7 @@
     if (apiKey()) {
       const m = Promise.all([
         loadItemMarket(id, force).then(
-          (v) => ((view.market = v), (view.marketErr = null)),
+          (v) => ((view.market = v), (view.marketErr = null), still() && startLive()),
           (e) => (view.marketErr = e.message)
         ),
         loadBazaarOpen(id, force).then(
@@ -703,12 +709,61 @@
     await done(true, "Refreshed ✓");
   }
   function startAuto() {
-    stopAuto();
+    clearInterval(view.timer);
     view.timer = setInterval(() => isOpen() && view.name === "item" && fetchItem(true), 30000);
   }
   function stopAuto() {
     clearInterval(view.timer);
     view.timer = 0;
+    stopLive();
+  }
+
+  // ---------------------------------------------------------------- live Item Market re-check
+  // While an item is open, re-check the Item Market's lowest price every 30s and update the
+  // Item Market box and the flip check in place, so whatever you're typing isn't interrupted.
+  function startLive() {
+    if (view.liveTimer || !apiKey()) return;
+    const id = view.id;
+    view.liveTimer = setInterval(async () => {
+      if (!isOpen() || document.hidden || view.name !== "item" || view.id !== id || view.refreshing) return;
+      try {
+        const m = await loadItemMarket(id, true);
+        if (view.name !== "item" || view.id !== id) return;
+        const old = view.market && view.market.price;
+        if (old && m.price && m.price !== old) view.marketChange = { from: old, to: m.price, t: Date.now() };
+        view.market = m;
+        view.marketErr = null;
+        view.liveErr = false;
+      } catch {
+        view.liveErr = true;
+      }
+      updateLive();
+    }, LIVE_INTERVAL);
+    view.ageTimer = setInterval(tickAge, 1000);
+  }
+  function stopLive() {
+    clearInterval(view.liveTimer);
+    clearInterval(view.ageTimer);
+    view.liveTimer = view.ageTimer = 0;
+  }
+  function liveAge() {
+    const m = view.market;
+    if (!m || !m.at) return "";
+    const s = Math.max(0, Math.round((Date.now() - m.at) / 1000));
+    const fresh = s < 60 && !view.liveErr;
+    return `<span class="dot ${fresh ? "on" : ""}"></span>checked <span class="im-age">${s < 60 ? s + "s" : Math.floor(s / 60) + "m"}</span> ago${view.liveErr ? " · re-check failed" : ""}`;
+  }
+  function tickAge() {
+    $$(".live").forEach((el) => (el.innerHTML = liveAge()));
+  }
+  function updateLive() {
+    if (view.name !== "item" || !view.data) return;
+    const st = $("#im-stat"),
+      fw = $("#flip-wrap");
+    if (st) st.innerHTML = imStatInner(view.cheapest, view.market && view.market.price);
+    if (fw) fw.innerHTML = view.cheapest && view.market && view.market.price ? flipBox(view.cheapest, view.market.price, flipProfit(view.cheapest, view.market.price)) : "";
+    const flash = view.marketChange && Date.now() - view.marketChange.t < 2000;
+    if (flash) [st, fw].forEach((el) => el && (el.classList.remove("flash"), void el.offsetWidth, el.classList.add("flash")));
   }
 
   const realListings = (all) => all.filter((l) => !S.hidden[l.player_id] && !(S.hideOwn && myId && l.player_id === myId));
@@ -778,6 +833,21 @@
     </div>`;
   }
 
+  function imStatInner(cheapest, imLow) {
+    const im = view.market;
+    return `<span>Item Market</span>${
+      !apiKey()
+        ? `<button class="link small" data-act="settings">add API key</button>`
+        : view.marketErr
+          ? `<small class="err">${esc(view.marketErr)}</small>`
+          : im === undefined
+            ? `<small class="muted">loading…</small>`
+            : imLow
+              ? `<b>${money(imLow)}</b><button class="mini" data-act="copy" data-v="${imLow}">copy</button>${cheapest ? (cheapest < imLow ? `<small class="g">bazaar ${short(imLow - cheapest)} cheaper</small>` : `<small class="r">market ${short(cheapest - imLow)} cheaper</small>`) : ""}<small class="live">${liveAge()}</small>`
+              : `<small class="muted">none listed</small><small class="live">${liveAge()}</small>`
+    }`;
+  }
+
   // Explains the buy-in-a-bazaar, resell-on-the-Item-Market sum line by line.
   function flipBox(cost, imLow, profit) {
     const sell = imLow - 1,
@@ -794,8 +864,14 @@
       verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The Item Market is already cheaper than the cheapest bazaar, so there's nothing to flip right now.`;
     else
       verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The gap between the two markets (${money(gap)}) is smaller than the fee, so this isn't worth it right now.`;
+    const ch = view.marketChange && Date.now() - view.marketChange.t < 90 * 1000 ? view.marketChange : null;
+    const change = ch
+      ? `<div class="flip-ch ${ch.to < ch.from ? "r" : "g"}">Item Market lowest just ${ch.to < ch.from ? "dropped" : "rose"} from ${money(ch.from)} to ${money(ch.to)}</div>`
+      : "";
     return `<div class="flip ${cls}">
       <div class="flip-h">Flip check: buy here, resell on the Item Market</div>
+      <div class="live small muted">${liveAge()}</div>
+      ${change}
       <dl class="flip-rows">
         <dt>Buy 1 from the cheapest bazaar</dt><dd>${money(cost)}</dd>
         <dt>Sell on the Item Market for <small>($1 under the cheapest listing)</small></dt><dd>${money(sell)}</dd>
@@ -820,6 +896,7 @@
     // Headline numbers ignore your own bazaar and sellers you hid, but not the other filters.
     const real = realListings(all);
     const cheapest = real.length ? Math.min(...real.map((l) => l.price)) : 0;
+    view.cheapest = cheapest;
     const totalQty = all.reduce((s, l) => s + l.quantity, 0);
     const im = view.market;
     const imLow = im && im.price ? im.price : 0;
@@ -848,25 +925,11 @@
         <div class="stat"><span>Lowest bazaar</span><b class="g">${money(cheapest || null)}</b>${pctPill(pct(cheapest, mv))}
           ${cheapest ? `<button class="mini" data-act="copy" data-v="${cheapest}">copy</button>` : ""}</div>
         <div class="stat"><span>Market value</span><b>${money(mv || null)}</b><small>avg of 5 cheapest ${short(avg5)}</small></div>
-        <div class="stat"><span>Item Market</span>${
-          !apiKey()
-            ? `<button class="link small" data-act="settings">add API key</button>`
-            : view.marketErr
-              ? `<small class="err">${esc(view.marketErr)}</small>`
-              : im === undefined
-                ? `<small class="muted">loading…</small>`
-                : imLow
-                  ? `<b>${money(imLow)}</b><button class="mini" data-act="copy" data-v="${imLow}">copy</button>${cheapest ? (cheapest < imLow ? `<small class="g">bazaar ${short(imLow - cheapest)} cheaper</small>` : `<small class="r">market ${short(cheapest - imLow)} cheaper</small>`) : ""}`
-                  : `<small class="muted">none listed</small>`
-        }</div>
+        <div class="stat" id="im-stat">${imStatInner(cheapest, imLow)}</div>
         <div class="stat"><span>Supply</span><b>${totalQty.toLocaleString()}</b><small>${all.length} bazaars</small></div>
       </div>
 
-      ${
-        imLow && cheapest
-          ? flipBox(cheapest, imLow, flip1)
-          : ""
-      }
+      <div id="flip-wrap">${imLow && cheapest ? flipBox(cheapest, imLow, flip1) : ""}</div>
 
       <div class="hist">
         <div class="hist-top">
@@ -1546,7 +1609,15 @@ input:focus, select:focus { border-color: var(--acc); }
 .flip.pos { border-color: rgba(127,220,111,.5); }
 .flip.neg { border-color: rgba(255,135,135,.45); }
 .flip.even { border-color: rgba(255,212,59,.5); }
-.flip-h { font-weight: 700; margin-bottom: 4px; }
+.flip-h { font-weight: 700; }
+.live { display: flex; align-items: center; gap: 5px; margin-bottom: 4px; font-size: 11px; color: var(--muted); }
+.stat small.live { display: flex; margin: 2px 0 0; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.on { background: var(--g); box-shadow: 0 0 0 3px rgba(127,220,111,.18); }
+.flip-ch { font-weight: 700; font-size: 12px; margin-bottom: 4px; }
+.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 2px var(--amber); } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .flash { animation: none; } .ib.spinning, .spin { animation-duration: 3s; } }
 .flip-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
 .flip-rows dt { color: var(--muted); } .flip-rows dt small { font-size: 11px; }
 .flip-rows dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }

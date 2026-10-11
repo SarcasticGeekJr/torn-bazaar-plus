@@ -22,7 +22,7 @@ A Torn userscript for buying and selling through bazaars. It shows the cheapest 
 - **Deal finder:** every item whose cheapest bazaar price is below market value. Filter by % off, max price, category and minimum value, and sort by % or $ off.
 
 **Selling**
-- **Flip check:** shows step by step what you'd pay in a bazaar, what you'd sell for on the Item Market, Torn's fees, and whether you'd make or lose money. Green means profit, amber means about break-even, red means a loss. The calculator also shows the total for your quantity.
+- **Flip check:** shows step by step what you'd pay in a bazaar, what you'd sell for on the Item Market, Torn's fees, and whether you'd make or lose money. Green means profit, amber means about break-even, red means a loss. The calculator also shows the total for your quantity. While an item is open, the Item Market price is re-checked every 30 seconds, with a "checked 8s ago" indicator and a notice when the lowest price drops or rises. Torn's API serves a cached copy, so prices can be up to about a minute old.
 - **Price helper:** on your own bazaar and the Item Market's add-listing page, tap a price box and a bar shows the cheapest bazaar price, Item Market price and market value. Tap a button to type that price minus your undercut amount into the box. **It never submits anything**; you check and confirm yourself.
 - **Undercut alerts:** every 10 minutes, compares your bazaar prices with the cheapest tracked price, and warns you when someone is cheaper. See it all under **My bazaar**.
 
