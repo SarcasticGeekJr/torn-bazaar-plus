@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bazaar Plus
 // @namespace    https://github.com/SarcasticGeekJr/torn-bazaar-plus
-// @version      2.2.1
-// @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip profit, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
+// @version      2.3.0
+// @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip checks, sell speed, flip finder, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
@@ -38,7 +38,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "2.2.1"; // keep in sync with @version above
+  const VERSION = "2.3.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-bazaar-plus/main/bazaar-plus.user.js";
   const W3B = "https://weav3r.dev/api/marketplace";
   const TORN = "https://api.torn.com";
@@ -215,10 +215,16 @@
   async function loadItemMarket(id, force) {
     const d = await torn(`/v2/market/${id}/itemmarket?offset=0`, ITEM_TTL, force);
     const ls = (d.itemmarket && d.itemmarket.listings) || [];
-    const low = ls.length ? ls.reduce((m, l) => (l.price < m.price ? l : m)) : { price: 0, amount: 0 };
+    // Price ladder: one row per price, cheapest first, with the units listed at that price.
+    const byPrice = new Map();
+    for (const l of ls) if (l.price > 0) byPrice.set(l.price, (byPrice.get(l.price) || 0) + (+l.amount || 1));
+    const levels = [...byPrice].sort((a, b) => a[0] - b[0]).map(([price, amount]) => ({ price, amount }));
     // Torn serves a cached copy; cache_timestamp says how old it is.
     const ts = d.itemmarket && d.itemmarket.cache_timestamp ? d.itemmarket.cache_timestamp * 1000 : 0;
-    return { price: low.price, amount: low.amount, at: ts && ts <= Date.now() ? ts : Date.now() };
+    const at = ts && ts <= Date.now() ? ts : Date.now();
+    recordMarketSnapshot(id, at, levels);
+    const low = levels[0] || { price: 0, amount: 0 };
+    return { price: low.price, amount: low.amount, at, levels, listings: ls.length };
   }
   // seller id -> is_open, for bazaars Torn lists as selling this item
   async function loadBazaarOpen(id, force) {
@@ -245,6 +251,85 @@
       price: +(it.price ?? it.cost ?? 0),
       mv: +(it.market_price ?? it.market_value ?? 0),
     }));
+  }
+
+  // ---------------------------------------------------------------- sell speed (estimated, stored on this device)
+  // Torn doesn't publish how many items sell, so we estimate it: each time we see the Item Market,
+  // we keep its cheapest price levels. If the cheapest listings are gone the next time we look,
+  // someone most likely bought them.
+  const SNAP_KEEP = 2 * 60 * MIN,
+    SNAP_MAX_GAP = 15 * MIN,
+    SPEED_MIN_WATCH = 5 * MIN;
+  function recordMarketSnapshot(id, at, levels) {
+    if (!levels.length) return;
+    let snaps = store.get("ims_" + id, []);
+    if (snaps.length && snaps[snaps.length - 1].at === at) return; // same cached copy as last time
+    snaps.push({ at, l: levels.slice(0, 15).map((x) => [x.price, x.amount]) });
+    snaps = snaps.filter((x) => Date.now() - x.at < SNAP_KEEP).slice(-60);
+    store.set("ims_" + id, snaps);
+    speedCache.delete(id);
+  }
+  const speedCache = new Map();
+  function sellSpeed(id) {
+    const hit = speedCache.get(id);
+    if (hit && Date.now() - hit.t < 30 * 1000) return hit.v;
+    const snaps = store.get("ims_" + id, []).filter((x) => Date.now() - x.at < SNAP_KEEP);
+    let sold = 0,
+      watched = 0;
+    for (let i = 1; i < snaps.length; i++) {
+      const a = snaps[i - 1],
+        b = snaps[i],
+        dt = b.at - a.at;
+      if (dt <= 0 || dt > SNAP_MAX_GAP || !b.l.length) continue;
+      const minB = b.l[0][0];
+      // Units cheaper than anything left were bought; a smaller pile at the new lowest price was partly bought.
+      for (const [price, amount] of a.l) {
+        if (price < minB) sold += amount;
+        else if (price === minB) sold += Math.max(0, amount - b.l[0][1]);
+      }
+      watched += dt;
+    }
+    let level = "none";
+    const perHour = watched ? sold / (watched / 3600000) : 0;
+    if (watched >= SPEED_MIN_WATCH) level = perHour >= 20 ? "fast" : perHour >= 3 ? "medium" : "slow";
+    const v = { level, sold, mins: Math.round(watched / MIN), perHour };
+    speedCache.set(id, { t: Date.now(), v });
+    return v;
+  }
+  const SPEED = { fast: ["🟢", "Fast"], medium: ["🟡", "Medium"], slow: ["🟠", "Slow"] };
+  const speedDot = (id) => {
+    const sp = sellSpeed(id);
+    return SPEED[sp.level] ? `<span class="sdot" title="Sells ${SPEED[sp.level][1].toLowerCase()} (estimate)">${SPEED[sp.level][0]}</span>` : "";
+  };
+  // One sentence for flip verdicts: does it resell quickly?
+  function speedNote(id) {
+    const lv = sellSpeed(id).level;
+    return lv === "fast" ? " It sells fast, so it should resell quickly." : lv === "slow" ? " <b class=\"a\">But it sells slowly, so expect to wait to resell.</b>" : "";
+  }
+  function speedBox(id, bazaars) {
+    const sp = sellSpeed(id);
+    const m = view.market;
+    const circ = view.info && view.info.circulation;
+    const signals = [
+      m && m.listings ? `${m.listings} Item Market listing${m.listings === 1 ? "" : "s"}` : "",
+      bazaars ? `${bazaars} bazaar${bazaars === 1 ? "" : "s"}` : "",
+      circ ? `${short(circ).slice(1)} in circulation` : "",
+    ].filter(Boolean).join(", ");
+    let head, text;
+    if (sp.level === "none") {
+      head = `⚪ Not enough data yet`;
+      text = apiKey()
+        ? `Keep the item open a few minutes, or add it to your watchlist, to build an estimate${sp.mins ? ` (${sp.mins} min watched so far)` : ""}.`
+        : `Needs an API key to watch the Item Market. <button class="link small" data-act="settings">Add one</button>`;
+    } else {
+      head = `${SPEED[sp.level][0]} ${SPEED[sp.level][1]}`;
+      text =
+        sp.sold > 0
+          ? `About ${sp.sold.toLocaleString()} sold on the Item Market in ${sp.mins} min of watching (last 2 hours).`
+          : `No Item Market sales seen in ${sp.mins} min of watching.${sp.level === "slow" ? " Selling may take hours." : ""}`;
+    }
+    return `<div class="speed"><div><b>Sell speed: ${head}</b> <span class="muted small">estimate</span></div>
+      <div class="small">${text}</div>${signals ? `<div class="small muted">${signals}.</div>` : ""}</div>`;
   }
 
   // ---------------------------------------------------------------- price history (stored on this device)
@@ -478,9 +563,9 @@
 
   function render() {
     $("[data-act=back]").hidden = view.name === "home";
-    const titles = { settings: "Settings", deals: "Deal finder", mine: "My bazaar", item: itemName(view.id) };
+    const titles = { settings: "Settings", deals: "Deal finder", mine: "My bazaar", flips: "Flip finder", item: itemName(view.id) };
     $(".title").textContent = titles[view.name] || "Bazaar Plus";
-    ({ home: renderHome, item: renderItem, settings: renderSettings, deals: renderDeals, mine: renderMine })[view.name]();
+    ({ home: renderHome, item: renderItem, settings: renderSettings, deals: renderDeals, mine: renderMine, flips: renderFlips })[view.name]();
   }
 
   // ---------------------------------------------------------------- home / search
@@ -496,6 +581,7 @@
       <div class="tiles">
         <button class="tile" data-act="deals"><span>🔥</span><b>Deal finder</b><small>items under market value</small></button>
         ${mineTile(under)}
+        <button class="tile" data-act="flips"><span>💹</span><b>Flip finder</b><small>checks your watchlist</small></button>
       </div>
       ${watched.length ? `<h3>★ Watchlist</h3><div class="list watch">${watched.map(([id, w]) => watchRow(+id, w)).join("")}</div>` : ""}
       ${S.recent.length ? `<h3>Recent</h3><div class="chips">${S.recent.map((id) => `<button class="chip" data-act="item" data-id="${id}">${esc(itemName(id))}</button>`).join("")}</div>` : ""}
@@ -531,7 +617,7 @@
     const d1 = priceAgo(h, 24 * 60 * MIN);
     return `<button class="row wrow ${hit ? "hit" : ""}" data-act="item" data-id="${id}">
       <img src="${img(id)}" alt="" loading="lazy">
-      <span class="nm">${esc(w.name || itemName(id))}<small>${w.target ? "target " + short(w.target) : "no target"}${d1 && low ? " · 24h " + pctTxt(pct(low, d1)) : ""}</small></span>
+      <span class="nm">${speedDot(id)}${esc(w.name || itemName(id))}<small>${w.target ? "target " + short(w.target) : "no target"}${d1 && low ? " · 24h " + pctTxt(pct(low, d1)) : ""}</small></span>
       <span class="rt"><b>${low ? money(low) : "—"}</b><small>${hit ? `<span class="g">✓ at target</span>` : it && it.market_price ? "MV " + short(it.market_price) : ""}</small></span>
     </button>`;
   }
@@ -554,7 +640,7 @@
   }
   const itemRow = (it, extra) => `<button class="row" data-act="item" data-id="${it.item_id}">
         <img src="${img(it.item_id)}" alt="" loading="lazy">
-        <span class="nm">${esc(it.item_name)}<small>${esc(it.type || "")}${it.total_bazaars ? " · " + it.total_bazaars + " bazaars" : ""}</small></span>
+        <span class="nm">${speedDot(it.item_id)}${esc(it.item_name)}<small>${esc(it.type || "")}${it.total_bazaars ? " · " + it.total_bazaars + " bazaars" : ""}</small></span>
         <span class="rt"><b>${it.lowest_price ? money(it.lowest_price) : "—"}</b><small>${extra || (it.market_price ? "MV " + short(it.market_price) : "")}</small></span>
       </button>`;
 
@@ -600,6 +686,59 @@
         renderDeals();
       })
     );
+  }
+
+  // ---------------------------------------------------------------- flip finder (watchlist only, to protect your API limit)
+  const FLIP_MAX = 25;
+  async function scanFlips() {
+    const ids = Object.keys(S.watch).map(Number).slice(0, FLIP_MAX);
+    view.flips = { running: true, done: 0, total: ids.length, rows: [] };
+    renderFlips();
+    for (const id of ids) {
+      const row = { id, name: (S.watch[id] && S.watch[id].name) || itemName(id) };
+      try {
+        const [d, m] = await Promise.all([loadListings(id), loadItemMarket(id)]);
+        const real = realListings(d.listings || []);
+        row.bazaar = real.length ? Math.min(...real.map((l) => l.price)) : 0;
+        row.im = m.price;
+        row.bz = row.bazaar && m.price ? flipProfit(row.bazaar, m.price) : null;
+        row.mm = m.levels.length > 1 ? afterFee(m.levels[1].price - 1) - m.levels[0].price : null;
+        row.best = Math.max(row.bz ?? -Infinity, row.mm ?? -Infinity);
+      } catch (e) {
+        row.err = e.message;
+      }
+      view.flips.rows.push(row);
+      view.flips.done++;
+      if (view.name === "flips") renderFlips();
+      await sleep(400);
+    }
+    view.flips.running = false;
+    view.flips.at = Date.now();
+    if (view.name === "flips") renderFlips();
+  }
+  function renderFlips() {
+    if (!apiKey()) return void (body().innerHTML = `<p class="hint">The flip finder needs a Torn API key to read Item Market prices. <button class="link" data-act="settings">Add one in settings</button>.</p>`);
+    const n = Object.keys(S.watch).length;
+    if (!n) return void (body().innerHTML = `<p class="hint">Add items to your watchlist first (tap ☆ on an item). The flip finder checks your watchlist items for both kinds of flip.</p>`);
+    const f = view.flips;
+    const scanBtn = `<button class="btn" data-act="scanFlips" ${f && f.running ? "disabled" : ""}>${f && f.running ? `Checking ${f.done} of ${f.total}…` : f ? "Check again" : `Check ${Math.min(n, FLIP_MAX)} watchlist items`}</button>`;
+    const intro = `<p class="small muted">Checks your watchlist for two flips: buy in a bazaar and resell on the Item Market, or buy the cheapest Item Market listing and relist it higher. Uses about ${Math.min(n, FLIP_MAX)} API calls. Profits are after ${feeShort()}.</p>`;
+    if (!f) return void (body().innerHTML = `${intro}${scanBtn}`);
+    const good = f.rows.filter((r) => r.best > 0).sort((a, b) => b.best - a.best);
+    const bad = f.rows.filter((r) => !(r.best > 0));
+    const line = (r) => {
+      const kind = r.bz != null && r.bz >= (r.mm ?? -Infinity) ? "Bazaar → Market" : "Market → Market";
+      return `<button class="row" data-act="item" data-id="${r.id}">
+        <img src="${img(r.id)}" alt="" loading="lazy">
+        <span class="nm">${speedDot(r.id)}${esc(r.name)}<small>${r.err ? `<span class="r">${esc(r.err)}</span>` : kind}</small></span>
+        <span class="rt">${r.err ? "" : `<b class="${r.best > 0 ? "g" : "r"}">${r.best > 0 ? "+" : ""}${money(r.best)}</b><small>per item</small>`}</span>
+      </button>`;
+    };
+    body().innerHTML = `${intro}<div class="row-btn">${scanBtn}${f.at ? `<span class="muted small">checked ${ago(f.at / 1000)} ago</span>` : ""}</div>
+      <h3>Profitable now (${good.length})</h3>
+      <div class="list">${good.length ? good.map(line).join("") : `<p class="muted hint">${f.running ? "Checking…" : "Nothing on your watchlist is profitable to flip right now."}</p>`}</div>
+      ${bad.length ? `<details class="more"><summary>${bad.length} not profitable right now</summary><div class="list">${bad.map(line).join("")}</div></details>` : ""}
+      <p class="foot muted">Tap an item to see the full flip check. Prices move fast, so check again before buying.</p>`;
   }
 
   // ---------------------------------------------------------------- my bazaar / undercut
@@ -649,7 +788,7 @@
               .map(
                 (i) => `<button class="row ${i.under ? "under" : ""}" data-act="item" data-id="${i.id}">
           <img src="${img(i.id)}" alt="" loading="lazy">
-          <span class="nm">${esc(i.name || itemName(i.id))}<small>you: ${money(i.price)} × ${i.qty}</small></span>
+          <span class="nm">${speedDot(i.id)}${esc(i.name || itemName(i.id))}<small>you: ${money(i.price)} × ${i.qty}${sellSpeed(i.id).level === "slow" ? ` · <span class="a">sells slowly, lower your price?</span>` : ""}</small></span>
           <span class="rt"><b class="${i.under ? "r" : "g"}">${i.low ? money(i.low) : "—"}</b><small>${i.under ? `undercut by ${short(i.price - i.low)}` : i.low ? "you're cheapest" : "no data"}</small></span>
         </button>`
               )
@@ -702,6 +841,10 @@
         ),
         loadBazaarOpen(id, force).then(
           (v) => (view.open = v),
+          () => {}
+        ),
+        loadItemInfo(id).then(
+          (i) => still() && (view.info = i || null),
           () => {}
         ),
       ]).then(() => !manual && still() && renderItem());
@@ -762,10 +905,15 @@
     if (view.name !== "item" || !view.data) return;
     const st = $("#im-stat"),
       fw = $("#flip-wrap");
-    if (st) st.innerHTML = imStatInner(view.cheapest, view.market && view.market.price);
-    if (fw) fw.innerHTML = view.cheapest && view.market && view.market.price ? flipBox(view.cheapest, view.market.price, flipProfit(view.cheapest, view.market.price)) : "";
+    const imLow = view.market && view.market.price;
+    if (st) st.innerHTML = imStatInner(view.cheapest, imLow);
+    if (fw) fw.innerHTML = flipsHtml(view.cheapest, imLow);
+    const bb = $("#best-buy"),
+      sp = $("#speed");
+    if (bb) bb.innerHTML = bestBuy(view.cheapest, imLow);
+    if (sp) sp.innerHTML = speedBox(view.id, view.bazaars);
     const flash = view.marketChange && Date.now() - view.marketChange.t < 2000;
-    if (flash) [st, fw].forEach((el) => el && (el.classList.remove("flash"), void el.offsetWidth, el.classList.add("flash")));
+    if (flash) [st, fw, bb].forEach((el) => el && (el.classList.remove("flash"), void el.offsetWidth, el.classList.add("flash")));
   }
 
   const realListings = (all) => all.filter((l) => !S.hidden[l.player_id] && !(S.hideOwn && myId && l.player_id === myId));
@@ -850,10 +998,10 @@
     }`;
   }
 
-  // Explains the buy-in-a-bazaar, resell-on-the-Item-Market sum line by line.
-  function flipBox(cost, imLow, profit) {
-    const sell = imLow - 1,
-      fee = sell - afterFee(sell),
+  // A flip explained line by line: what you pay, what you'd sell for, Torn's fees, and the verdict.
+  function flipCard({ title, buyLabel, cost, sellLabel, sell, gapNote, why, first = true }) {
+    const fee = sell - afterFee(sell),
+      profit = sell - fee - cost,
       gap = sell - cost;
     const close = Math.abs(profit) <= cost * 0.01;
     const cls = close ? "even" : profit > 0 ? "pos" : "neg";
@@ -861,27 +1009,64 @@
     if (close)
       verdict = `<b class="a">About break-even: around ${money(Math.abs(profit))} ${profit >= 0 ? "profit" : "loss"} per item.</b> It's probably not worth the risk, since one cheaper listing would wipe it out.`;
     else if (profit > 0)
-      verdict = `<b class="g">You'd make ${money(profit)} per item.</b> Prices can change before you resell, so check the Item Market price again before buying.`;
-    else if (gap <= 0)
-      verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The Item Market is already cheaper than the cheapest bazaar, so there's nothing to flip right now.`;
-    else
-      verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The gap between the two markets (${money(gap)}) is smaller than the fee, so this isn't worth it right now.`;
-    const ch = view.marketChange && Date.now() - view.marketChange.t < 90 * 1000 ? view.marketChange : null;
+      verdict = `<b class="g">You'd make ${money(profit)} per item.</b> Prices can change before you resell, so check the Item Market price again before buying.${speedNote(view.id)}`;
+    else if (gap <= 0) verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> ${why}`;
+    else verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> ${gapNote(gap)}`;
+    // The "checked … ago" line and the price-change notice only go on the first box.
+    const ch = first && view.marketChange && Date.now() - view.marketChange.t < 90 * 1000 ? view.marketChange : null;
     const change = ch
       ? `<div class="flip-ch ${ch.to < ch.from ? "r" : "g"}">Item Market lowest just ${ch.to < ch.from ? "dropped" : "rose"} from ${money(ch.from)} to ${money(ch.to)}</div>`
       : "";
     return `<div class="flip ${cls}">
-      <div class="flip-h">Flip check: buy here, resell on the Item Market</div>
-      <div class="live small muted">${liveAge()}</div>
+      <div class="flip-h">${title}</div>
+      ${first ? `<div class="live small muted">${liveAge()}</div>` : ""}
       ${change}
       <dl class="flip-rows">
-        <dt>Buy 1 from the cheapest bazaar</dt><dd>${money(cost)}</dd>
-        <dt>Sell on the Item Market for <small>($1 under the cheapest listing)</small></dt><dd>${money(sell)}</dd>
+        <dt>${buyLabel}</dt><dd>${money(cost)}</dd>
+        <dt>${sellLabel}</dt><dd>${money(sell)}</dd>
         <dt>${feeLabel()}</dt><dd class="r">−${money(fee)}</dd>
         <dt>You'd receive</dt><dd><b>${money(sell - fee)}</b></dd>
       </dl>
       <div class="flip-v">${verdict}</div>
     </div>`;
+  }
+  function flipBox(cost, imLow) {
+    return flipCard({
+      title: "Flip check: buy here, resell on the Item Market",
+      buyLabel: "Buy 1 from the cheapest bazaar",
+      cost,
+      sellLabel: "Sell on the Item Market for <small>($1 under the cheapest listing)</small>",
+      sell: imLow - 1,
+      gapNote: (gap) => `The gap between the two markets (${money(gap)}) is smaller than the fee, so this isn't worth it right now.`,
+      why: "The Item Market is already cheaper than the cheapest bazaar, so there's nothing to flip right now.",
+    });
+  }
+  // Buy the cheapest Item Market listing and relist it $1 under the next price up.
+  function marketFlipBox(first) {
+    const lv = (view.market && view.market.levels) || [];
+    if (!lv.length) return "";
+    if (lv.length < 2)
+      return `<div class="flip even"><div class="flip-h">Flip check: buy the cheapest on the Item Market, relist it higher</div>
+        <div class="flip-v muted">Only one price on the Item Market right now, so there's no gap to flip.</div></div>`;
+    return flipCard({
+      title: "Flip check: buy the cheapest on the Item Market, relist it higher",
+      buyLabel: `Buy the cheapest Item Market listing <small>(${lv[0].amount.toLocaleString()} available)</small>`,
+      cost: lv[0].price,
+      sellLabel: "Relist on the Item Market for <small>($1 under the next listing)</small>",
+      sell: lv[1].price - 1,
+      gapNote: (gap) => `The gap (${money(gap)}) is smaller than the fee.`,
+      why: "The next listing is only $1 more, so there's no gap to flip.",
+      first,
+    });
+  }
+  const flipsHtml = (cheapest, imLow) => (imLow && cheapest ? flipBox(cheapest, imLow) : "") + (imLow ? marketFlipBox(!cheapest) : "");
+  // Where it's cheapest to buy right now.
+  function bestBuy(cheapest, imLow) {
+    if (!cheapest || !imLow) return "";
+    if (cheapest === imLow) return `<div class="best">Cheapest right now: <b>same price</b> in bazaars and on the Item Market (${money(imLow)})</div>`;
+    return cheapest < imLow
+      ? `<div class="best">Cheapest right now: <b>bazaar at ${money(cheapest)}</b> <span class="muted">(Item Market is ${money(imLow - cheapest)} more)</span></div>`
+      : `<div class="best">Cheapest right now: <b>Item Market at ${money(imLow)}</b> <span class="muted">(cheapest bazaar is ${money(cheapest - imLow)} more)</span></div>`;
   }
 
   function renderItem() {
@@ -909,7 +1094,7 @@
     const h = store.get("h_" + id, []);
     const d1 = priceAgo(h, 24 * 60 * MIN),
       d7 = priceAgo(h, 7 * 24 * 60 * MIN);
-    const flip1 = cheapest ? flipProfit(cheapest, imLow) : null;
+    view.bazaars = all.length;
     const flipN = p && p.got && imLow ? flipProfit(0, imLow) * p.got - p.cost : null;
 
     body().innerHTML = `
@@ -923,15 +1108,19 @@
         <button class="ib ${view.refreshing ? "spinning" : ""}" data-act="refresh" title="Refresh" ${view.refreshing ? "disabled" : ""}>⟳</button>
       </div>
 
+      <div id="best-buy">${bestBuy(cheapest, imLow)}</div>
+
       <div class="stats">
         <div class="stat"><span>Lowest bazaar</span><b class="g">${money(cheapest || null)}</b>${pctPill(pct(cheapest, mv))}
           ${cheapest ? `<button class="mini" data-act="copy" data-v="${cheapest}">copy</button>` : ""}</div>
         <div class="stat"><span>Market value</span><b>${money(mv || null)}</b><small>avg of 5 cheapest ${short(avg5)}</small></div>
         <div class="stat" id="im-stat">${imStatInner(cheapest, imLow)}</div>
-        <div class="stat"><span>Supply</span><b>${totalQty.toLocaleString()}</b><small>${all.length} bazaars</small></div>
+        <div class="stat"><span>Supply</span><b>${totalQty.toLocaleString()}</b><small>${all.length} bazaar${all.length === 1 ? "" : "s"}</small></div>
       </div>
 
-      <div id="flip-wrap">${imLow && cheapest ? flipBox(cheapest, imLow, flip1) : ""}</div>
+      <div id="speed">${speedBox(id, all.length)}</div>
+
+      <div id="flip-wrap">${flipsHtml(cheapest, imLow)}</div>
 
       <div class="hist">
         <div class="hist-top">
@@ -1128,7 +1317,11 @@
       case "settings":
       case "deals":
       case "mine":
+      case "flips":
         go(act);
+        break;
+      case "scanFlips":
+        if (!(view.flips && view.flips.running)) scanFlips();
         break;
       case "item":
         go("item", +el.dataset.id);
@@ -1221,7 +1414,7 @@
         break;
       case "clearHistory":
         Object.keys(localStorage)
-          .filter((k) => k.startsWith("bzp_h_"))
+          .filter((k) => k.startsWith("bzp_h_") || k.startsWith("bzp_ims_"))
           .forEach((k) => localStorage.removeItem(k));
         toast("History cleared");
         break;
@@ -1379,6 +1572,11 @@
       await loadItems(Date.now() - itemListAt > MONITOR_INTERVAL / 2).catch(() => {}); // reuse a list that's still fresh
       if (doUnder && (due || !view.mine)) await fetchMine(due);
       if (due) store.set("monitorAt", Date.now());
+      if (due && apiKey())
+        for (const id of Object.keys(S.watch).slice(0, 15)) {
+          await loadItemMarket(+id, true).catch(() => {});
+          await sleep(400);
+        }
 
       const active = [];
       for (const [id, w] of Object.entries(S.watch)) {
@@ -1621,7 +1819,7 @@ input:focus, select:focus { border-color: var(--acc); }
 .wrow.hit { border-color: var(--amber); }
 .row.under { border-color: var(--r); }
 .ctx { display: block; width: 100%; margin: 4px 0 4px; padding: 10px; border-radius: 12px; border: 1px dashed var(--acc); background: transparent; color: var(--acc); text-align: left; }
-.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
 .tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; background: var(--bg2); border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 10px; }
 .tile span { font-size: 20px; } .tile small { color: var(--muted); font-size: 11px; }
 .tile.warn { border-color: var(--r); } .tile.warn small { color: var(--r); }
@@ -1648,6 +1846,14 @@ input:focus, select:focus { border-color: var(--acc); }
 .stat small.live { display: flex; margin: 2px 0 0; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.on { background: var(--g); box-shadow: 0 0 0 3px rgba(127,220,111,.18); }
+.best { margin: -4px 0 10px; padding: 8px 10px; border-radius: 12px; background: var(--bg2); border: 1px solid var(--line); font-size: 13px; }
+.speed { margin-top: 10px; padding: 8px 10px; border-radius: 12px; background: var(--bg2); border: 1px solid var(--line); display: grid; gap: 2px; font-size: 13px; }
+.sdot { margin-right: 4px; font-size: 11px; }
+#flip-wrap { display: grid; gap: 0; }
+.row-btn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
+.btn:disabled { opacity: .6; }
+details.more { margin-top: 10px; } details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 2px; }
+details.more .list { margin-top: 6px; }
 .flip-ch { font-weight: 700; font-size: 12px; margin-bottom: 4px; }
 .flash { animation: flash 1.6s ease-out; }
 @keyframes flash { 0% { box-shadow: 0 0 0 2px var(--amber); } 100% { box-shadow: 0 0 0 0 transparent; } }

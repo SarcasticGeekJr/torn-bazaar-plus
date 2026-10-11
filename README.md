@@ -20,9 +20,13 @@ A Torn userscript for buying and selling through bazaars. It shows the cheapest 
 - **Copy price:** ⧉ on any listing, or "copy" next to the lowest bazaar and Item Market prices.
 - **Seller status** (ⓘ): shows whether the seller is OK, travelling, in hospital or in jail, plus their last action and whether their bazaar is open. Closed bazaars are dimmed and tagged automatically.
 - **Deal finder:** every item whose cheapest bazaar price is below market value. Filter by % off, max price, category and minimum value, and sort by % or $ off.
+- **Cheapest right now:** a line at the top of each item says whether a bazaar or the Item Market is cheaper, and by how much.
+- **Sell speed (estimate):** 🟢 Fast, 🟡 Medium or 🟠 Slow, based on how many cheap Item Market listings disappear while you have the item open, or every 10 minutes for watchlist items. Torn doesn't publish real sales numbers, so this is an estimate built up on your phone. The dot also shows in the watchlist, Deal finder, Flip finder and My bazaar.
+- **Flip finder** (💹 on the home screen): checks your watchlist items for both kinds of flip and lists the profitable ones. It uses about one API call per item.
 
 **Selling**
 - **Flip check:** shows step by step what you'd pay in a bazaar, what you'd sell for on the Item Market, Torn's fees, and whether you'd make or lose money. Green means profit, amber means about break-even, red means a loss. The calculator also shows the total for your quantity. While an item is open, the Item Market price is re-checked every 30 seconds, with a "checked 8s ago" indicator and a notice when the lowest price drops or rises. Torn's API serves a cached copy, so prices can be up to about a minute old.
+- **Item Market → Item Market flip check:** buy the cheapest Item Market listing and relist it $1 under the next one up, with the same step-by-step sum. When a flip is profitable, it also says whether the item sells fast or slowly.
 - **Price helper:** on your own bazaar and the Item Market's add-listing page, tap a price box and a bar shows the cheapest bazaar price, Item Market price and market value. Tap a button to type that price minus your undercut amount into the box. **It never submits anything**; you check and confirm yourself.
 - **Undercut alerts:** every 10 minutes, compares your bazaar prices with the cheapest tracked price, and warns you when someone is cheaper. See it all under **My bazaar**.
 
