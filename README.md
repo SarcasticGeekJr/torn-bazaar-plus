@@ -22,7 +22,7 @@ A Torn userscript for buying and selling through bazaars. It shows the cheapest 
 - **Deal finder:** every item whose cheapest bazaar price is below market value. Filter by % off, max price, category and minimum value, and sort by % or $ off.
 
 **Selling**
-- **Flip profit:** buy at the cheapest bazaar price and list $1 under the Item Market's lowest, minus the selling fee. It's shown per item and for the quantity in the calculator.
+- **Flip check:** shows step by step what you'd pay in a bazaar, what you'd sell for on the Item Market, Torn's fees, and whether you'd make or lose money. Green means profit, amber means about break-even, red means a loss. The calculator also shows the total for your quantity.
 - **Price helper:** on your own bazaar and the Item Market's add-listing page, tap a price box and a bar shows the cheapest bazaar price, Item Market price and market value. Tap a button to type that price minus your undercut amount into the box. **It never submits anything**; you check and confirm yourself.
 - **Undercut alerts:** every 10 minutes, compares your bazaar prices with the cheapest tracked price, and warns you when someone is cheaper. See it all under **My bazaar**.
 
@@ -65,5 +65,5 @@ A **Public** key adds Item Market prices, flip profit, item info, seller status,
 
 - Bazaar data comes from [TornW3B (weav3r.dev)](https://weav3r.dev). It doesn't track $1 listings, and prices can be a few minutes old, so always confirm in the bazaar.
 - Official Torn API: v2 `market/{id}/itemmarket`, `market/{id}/bazaar`, `torn/{id}/items`; v1 `user/{id}?selections=profile` and `user/?selections=bazaar`.
-- **Item Market fee:** flip profit uses 5% by default. Check the real fee in Torn and change it in settings if it's different.
+- **Item Market fees:** flip numbers use Torn's 5% sales fee (in place since June 2025). If you sell anonymously, tick **I sell anonymously** in ⚙ Settings to add the 10% anonymous fee (15% in total). If you have the 5★ Car Dealership or 5★ Property Broker special, also tick that box to remove it again.
 - The script reads data, displays it, and can type a price into a box when you tap a button. It never buys, lists or confirms anything, which keeps it within Torn's scripting rules.

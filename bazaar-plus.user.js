@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bazaar Plus
 // @namespace    https://github.com/SarcasticGeekJr/torn-bazaar-plus
-// @version      2.0.1
+// @version      2.1.0
 // @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip profit, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -61,7 +61,9 @@
     undercut: true,
     alertPopup: true,
     alertVibrate: true,
-    fee: 5, // Item Market selling fee, %
+    fee: 5, // Item Market sales fee, % (Torn's standard fee since June 2025)
+    anon: false, // I list anonymously on the Item Market (+10%)
+    anonWaived: false, // 5* Car Dealership / Property Broker special removes the anonymous fee
     undercutBy: 1, // $ under the cheapest when the price helper fills a price
     fab: null, // { right, bottom } in px once dragged
     deals: { minPct: 10, maxPrice: 0, minMv: 1000, type: "", sort: "pct" },
@@ -320,8 +322,14 @@
   const bazaarUrl = (pid) => `https://www.torn.com/bazaar.php?userId=${pid}#/`;
   const profileUrl = (pid) => `https://www.torn.com/profiles.php?XID=${pid}`;
   const marketUrl = (id) => `https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${id}`;
-  // Profit from buying at `cost` and listing on the Item Market $1 under `imLow`, after the selling fee.
-  const flipProfit = (cost, imLow) => (imLow > 1 ? Math.floor((imLow - 1) * (1 - S.fee / 100)) - cost : null);
+  // Item Market fees: the sales fee, plus 10% when listing anonymously unless a company special waives it.
+  const anonFee = () => (S.anon && !S.anonWaived ? 10 : 0);
+  const feePct = () => (+S.fee || 0) + anonFee();
+  const feeLabel = () => (anonFee() ? `Torn's fees (${+S.fee || 0}% sale + ${anonFee()}% anonymous)` : `Torn's ${feePct()}% sales fee`);
+  const feeShort = () => (anonFee() ? `the ${feePct()}% fees` : `the ${feePct()}% fee`);
+  const afterFee = (price) => Math.floor(price * (1 - feePct() / 100));
+  // Profit from buying at `cost` and listing on the Item Market $1 under `imLow`, after fees.
+  const flipProfit = (cost, imLow) => (imLow > 1 ? afterFee(imLow - 1) - cost : null);
 
   async function copyText(text) {
     try {
@@ -770,6 +778,34 @@
     </div>`;
   }
 
+  // Explains the buy-in-a-bazaar, resell-on-the-Item-Market sum line by line.
+  function flipBox(cost, imLow, profit) {
+    const sell = imLow - 1,
+      fee = sell - afterFee(sell),
+      gap = sell - cost;
+    const close = Math.abs(profit) <= cost * 0.01;
+    const cls = close ? "even" : profit > 0 ? "pos" : "neg";
+    let verdict;
+    if (close)
+      verdict = `<b class="a">About break-even: around ${money(Math.abs(profit))} ${profit >= 0 ? "profit" : "loss"} per item.</b> It's probably not worth the risk, since one cheaper listing would wipe it out.`;
+    else if (profit > 0)
+      verdict = `<b class="g">You'd make ${money(profit)} per item.</b> Prices can change before you resell, so check the Item Market price again before buying.`;
+    else if (gap <= 0)
+      verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The Item Market is already cheaper than the cheapest bazaar, so there's nothing to flip right now.`;
+    else
+      verdict = `<b class="r">You'd lose ${money(-profit)} per item.</b> The gap between the two markets (${money(gap)}) is smaller than the fee, so this isn't worth it right now.`;
+    return `<div class="flip ${cls}">
+      <div class="flip-h">Flip check: buy here, resell on the Item Market</div>
+      <dl class="flip-rows">
+        <dt>Buy 1 from the cheapest bazaar</dt><dd>${money(cost)}</dd>
+        <dt>Sell on the Item Market for <small>($1 under the cheapest listing)</small></dt><dd>${money(sell)}</dd>
+        <dt>${feeLabel()}</dt><dd class="r">−${money(fee)}</dd>
+        <dt>You'd receive</dt><dd><b>${money(sell - fee)}</b></dd>
+      </dl>
+      <div class="flip-v">${verdict}</div>
+    </div>`;
+  }
+
   function renderItem() {
     const id = view.id;
     const base = itemById(id) || {};
@@ -828,10 +864,7 @@
 
       ${
         imLow && cheapest
-          ? `<div class="flip ${flip1 > 0 ? "pos" : "neg"}">
-        <div><b>Flip:</b> buy at ${money(cheapest)} in a bazaar → list at ${money(imLow - 1)} on the Item Market</div>
-        <div>${flip1 > 0 ? `<span class="g">+${money(flip1)} profit each</span>` : `<span class="r">${money(flip1)} each, not worth it</span>`} <span class="muted small">after ${S.fee}% fee</span></div>
-      </div>`
+          ? flipBox(cheapest, imLow, flip1)
           : ""
       }
 
@@ -853,7 +886,7 @@
           p
             ? p.got < view.buy
               ? `<span class="r">Only ${p.got.toLocaleString()} available</span> · ${money(p.cost)}`
-              : `<b>${money(p.cost)}</b> · avg ${money(p.cost / p.got)} · ${p.sellers} seller${p.sellers > 1 ? "s" : ""}${mv ? " · " + pctPill(pct(p.cost / p.got, mv)) : ""}${flipN != null ? `<br><span class="${flipN > 0 ? "g" : "r"}">flip ${flipN > 0 ? "+" : ""}${money(flipN)}</span>` : ""}`
+              : `<b>${money(p.cost)}</b> · avg ${money(p.cost / p.got)} · ${p.sellers} seller${p.sellers > 1 ? "s" : ""}${mv ? " · " + pctPill(pct(p.cost / p.got, mv)) : ""}${flipN != null ? `<div class="calc-flip"><b>If you resell all ${p.got.toLocaleString()} on the Item Market:</b> <span class="${flipN > 0 ? "g" : "r"}">you'd ${flipN > 0 ? "make" : "lose"} ${money(Math.abs(flipN))} in total</span>, after ${feeShort()}.</div>` : ""}`
             : `<span class="muted">Enter a quantity to see the cheapest total</span>`
         }</div>
       </div>
@@ -946,8 +979,13 @@
         <h3>Selling</h3>
         ${tog("priceHelper", "Price helper when I type a price on my bazaar or the Item Market")}
         <label class="tog">Undercut by $<input class="num" data-n="undercutBy" type="number" min="0" inputmode="numeric" value="${S.undercutBy}"></label>
-        <label class="tog">Item Market fee %<input class="num" data-n="fee" type="number" min="0" max="50" step="0.5" inputmode="decimal" value="${S.fee}"></label>
-        <p class="muted small">Used for flip profit. Check the current fee in Torn and change it here if it's different.</p>
+        <label class="tog col"><span><input type="checkbox" data-s="anon" ${S.anon ? "checked" : ""}> <b>I sell anonymously on the Item Market</b></span>
+          <small class="muted">Adds Torn's 10% anonymous fee to the flip numbers (15% in total).</small></label>
+        <label class="tog col"><span><input type="checkbox" data-s="anonWaived" ${S.anonWaived ? "checked" : ""}> <b>I have the 5★ Car Dealership or 5★ Property Broker special</b></span>
+          <small class="muted">These remove the 10% anonymous fee. Only matters if the switch above is on.</small></label>
+        <label class="tog col"><span class="feerow"><b>Item Market sales fee</b><input class="num" data-n="fee" type="number" min="0" max="50" step="0.5" inputmode="decimal" value="${S.fee}"><b>%</b></span>
+          <small class="muted">Torn's standard fee since June 2025. Only change this if Torn changes it.</small></label>
+        <p class="muted small">Fees used for flip numbers right now: <b class="feenow">${feePct()}%</b></p>
 
         <h3>Alerts</h3>
         ${tog("undercut", "Check my bazaar for undercuts (every 10 min, needs API key)")}
@@ -978,6 +1016,8 @@
       el.addEventListener("change", () => {
         S[el.dataset.s] = el.checked;
         save();
+        const fn = $(".feenow");
+        if (fn) fn.textContent = feePct() + "%";
         if (el.dataset.s === "marketBadge") onRoute();
         if (el.dataset.s === "undercut") monitor(true);
       })
@@ -986,6 +1026,8 @@
       el.addEventListener("change", () => {
         S[el.dataset.n] = Math.max(0, parseFloat(el.value) || 0);
         save();
+        const fn = $(".feenow");
+        if (fn) fn.textContent = feePct() + "%";
         toast("Saved");
       })
     );
@@ -1268,7 +1310,9 @@
   // When you focus a price box next to an item, show the cheapest prices and offer to type one in for you.
   let helperInput = null,
     helperItem = 0,
-    helperHideT = 0;
+    helperHideT = 0,
+    helperState = null,
+    helperFilled = 0;
   function isSellPage() {
     if (/\/bazaar\.php/.test(location.pathname)) return !new URLSearchParams(location.search).get("userId") || +new URLSearchParams(location.search).get("userId") === myId;
     return /sid=ItemMarket/i.test(location.search) && /add|sell|listing/i.test(location.hash);
@@ -1298,6 +1342,7 @@
     const id = itemIdNear(inp);
     if (!id) return;
     clearTimeout(helperHideT);
+    if (id !== helperItem) helperFilled = 0;
     helperInput = inp;
     helperItem = id;
     renderHelper(null);
@@ -1317,9 +1362,13 @@
     if (!s) box.innerHTML = `<div class="hl-top"><b>${esc(name)}</b><span class="muted small">loading prices…</span><button class="ib sm" data-act="helperClose">✕</button></div>`;
     else if (s.err) box.innerHTML = `<div class="hl-top"><b>${esc(name)}</b><span class="err small">${esc(s.err)}</span><button class="ib sm" data-act="helperClose">✕</button></div>`;
     else {
+      helperState = s;
+      const onMarket = /sid=ItemMarket/i.test(location.search);
+      const price = helperFilled || (s.im > by ? s.im - by : s.low > by ? s.low - by : 0);
+      const receive = onMarket && anonFee() && price ? `<div class="hl-recv">You'll receive about <b>${money(afterFee(price))}</b> after ${feeShort()}${helperFilled ? "" : ` (at ${money(price)})`}.</div>` : "";
       const btn = (v, label) => (v > by ? `<button class="btn sm" data-act="fill" data-v="${v - by}">${label}: ${money(v - by)}</button>` : "");
       box.innerHTML = `<div class="hl-top"><b>${esc(name)}</b><span class="muted small">bazaar ${short(s.low || null)} · market ${short(s.im || null)} · MV ${short(s.mv || null)}</span><button class="ib sm" data-act="helperClose">✕</button></div>
-        <div class="hl-btns">${btn(s.low, "Under bazaar")}${btn(s.im, "Under market")}${s.mv ? `<button class="btn sm ghost" data-act="fill" data-v="${s.mv}">Market value: ${money(s.mv)}</button>` : ""}</div>`;
+        <div class="hl-btns">${btn(s.low, "Under bazaar")}${btn(s.im, "Under market")}${s.mv ? `<button class="btn sm ghost" data-act="fill" data-v="${s.mv}">Market value: ${money(s.mv)}</button>` : ""}</div>${receive}`;
     }
     const r = helperInput && helperInput.getBoundingClientRect();
     box.classList.toggle("bottom", !!r && r.top < innerHeight / 2);
@@ -1342,6 +1391,8 @@
     setter.call(inp, String(v));
     for (const type of ["input", "change", "keyup"]) inp.dispatchEvent(new Event(type, { bubbles: true }));
     inp.focus();
+    helperFilled = v;
+    if (helperState) renderHelper(helperState);
     toast(`Price set to ${money(v)}. Check it, then confirm yourself.`, "ok", 2600);
   }
 
@@ -1493,6 +1544,19 @@ input:focus, select:focus { border-color: var(--acc); }
 .pill.even { background: var(--bg3); color: var(--muted); } .pill.deal { background: rgba(116,192,252,.15); color: var(--acc); }
 .flip { margin-top: 10px; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg2); font-size: 13px; display: grid; gap: 2px; }
 .flip.pos { border-color: rgba(127,220,111,.5); }
+.flip.neg { border-color: rgba(255,135,135,.45); }
+.flip.even { border-color: rgba(255,212,59,.5); }
+.flip-h { font-weight: 700; margin-bottom: 4px; }
+.flip-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
+.flip-rows dt { color: var(--muted); } .flip-rows dt small { font-size: 11px; }
+.flip-rows dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.flip-rows dt:nth-last-of-type(1), .flip-rows dd:nth-last-of-type(1) { border-top: 1px solid var(--line); padding-top: 3px; }
+.flip-v { margin-top: 6px; line-height: 1.4; }
+.calc-flip { margin-top: 4px; }
+.tog.col { flex-direction: column; align-items: stretch; gap: 3px; }
+.tog.col > span { display: flex; align-items: center; gap: 10px; }
+.tog .feerow input.num { margin-left: auto; }
+.hl-recv { margin-top: 8px; font-size: 13px; color: var(--amber); }
 .hist { margin-top: 10px; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg2); }
 .hist-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .seg.mini2 { flex: none; padding: 2px 6px; font-size: 11px; border: 1px solid var(--line); }
