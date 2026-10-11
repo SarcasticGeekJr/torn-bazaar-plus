@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bazaar Plus
 // @namespace    https://github.com/SarcasticGeekJr/torn-bazaar-plus
-// @version      2.2.0
+// @version      2.2.1
 // @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip profit, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -38,6 +38,8 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
+  const VERSION = "2.2.1"; // keep in sync with @version above
+  const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-bazaar-plus/main/bazaar-plus.user.js";
   const W3B = "https://weav3r.dev/api/marketplace";
   const TORN = "https://api.torn.com";
   const MIN = 60 * 1000;
@@ -498,7 +500,7 @@
       ${watched.length ? `<h3>★ Watchlist</h3><div class="list watch">${watched.map(([id, w]) => watchRow(+id, w)).join("")}</div>` : ""}
       ${S.recent.length ? `<h3>Recent</h3><div class="chips">${S.recent.map((id) => `<button class="chip" data-act="item" data-id="${id}">${esc(itemName(id))}</button>`).join("")}</div>` : ""}
       ${!watched.length && !S.recent.length ? `<p class="muted hint">Type an item name to see every tracked bazaar selling it, cheapest first. Tap ☆ on an item to watch it with a target price.</p>` : ""}
-      <p class="foot muted">Bazaar data: TornW3B (weav3r.dev). Prices move fast, so check in the bazaar before you buy.</p>`;
+      <p class="foot muted">Bazaar data: TornW3B (weav3r.dev). Prices move fast, so check in the bazaar before you buy.<br>Bazaar Plus v${VERSION}</p>`;
     const q = $(".q");
     q.addEventListener("input", () => {
       view.q = q.value;
@@ -1068,6 +1070,13 @@
         <button class="btn ghost" data-act="reloadItems">Reload item list</button>
         <button class="btn ghost" data-act="clearHistory">Clear price history</button>
         <p class="muted small">Tip: drag the 🛒 button to move it.</p>
+
+        <h3>About</h3>
+        <div class="about">
+          <div><b>Bazaar Plus v${VERSION}</b></div>
+          <button class="btn ghost" data-act="checkUpdate">Check for updates</button>
+          <div class="upd small muted"></div>
+        </div>
       </div>`;
     $(".key").addEventListener("change", (e) => {
       S.apiKey = e.target.value.trim();
@@ -1222,6 +1231,31 @@
         placeFab();
         toast("Button moved back");
         break;
+      case "checkUpdate": {
+        const out = $(".upd");
+        out.className = "upd small muted";
+        out.textContent = "Checking…";
+        try {
+          // Ask for the file itself (not JSON), bypassing caches, and read its @version line.
+          const url = UPDATE_URL + "?t=" + Date.now();
+          let text;
+          if (typeof window.PDA_httpGet === "function") text = (await window.PDA_httpGet(url, {}))?.responseText;
+          else if (typeof GM_xmlhttpRequest === "function")
+            text = await new Promise((res, rej) => GM_xmlhttpRequest({ method: "GET", url, onload: (r) => res(r.responseText), onerror: rej }));
+          else text = await (await fetch(url)).text();
+          const latest = ((text || "").match(/@version\s+(\S+)/) || [])[1];
+          if (!latest) throw new Error("couldn't read the latest version");
+          const newer = latest.split(".").map(Number).reduce((r, n, i) => r || (n > (+VERSION.split(".")[i] || 0) ? 1 : n < (+VERSION.split(".")[i] || 0) ? -1 : 0), 0) > 0;
+          out.className = "upd small " + (newer ? "a" : "g");
+          out.textContent = newer
+            ? `Version ${latest} is available. Close and reopen Torn PDA, or go to Settings → Userscripts and check for updates.`
+            : `You're up to date (latest is ${latest}).`;
+        } catch (er) {
+          out.className = "upd small r";
+          out.textContent = "Couldn't check: " + er.message;
+        }
+        break;
+      }
       case "testAlert":
         showAlert([{ key: "test", id: 206, text: "Test alert: this is how alerts look" }]);
         break;
@@ -1627,6 +1661,8 @@ input:focus, select:focus { border-color: var(--acc); }
 .tog.col { flex-direction: column; align-items: stretch; gap: 3px; }
 .tog.col > span { display: flex; align-items: center; gap: 10px; }
 .tog .feerow input.num { margin-left: auto; }
+.about { display: grid; gap: 6px; justify-items: start; }
+.about .btn.ghost { margin: 0; }
 .hl-recv { margin-top: 8px; font-size: 13px; color: var(--amber); }
 .hist { margin-top: 10px; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg2); }
 .hist-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
