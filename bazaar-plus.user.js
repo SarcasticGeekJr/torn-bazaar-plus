@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Bazaar Plus
 // @namespace    https://github.com/SarcasticGeekJr/torn-bazaar-plus
-// @version      2.3.0
+// @version      2.4.0
 // @description  Cheapest bazaar listings for any item, with filters, buy calculator, flip checks, sell speed, flip finder, price history, deal finder, watchlist and undercut alerts, item info, seller status and a price helper when you list items. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      weav3r.dev
 // @connect      api.torn.com
+// @connect      ntfy.sh
 // @run-at       document-end
 // @homepageURL  https://github.com/SarcasticGeekJr/torn-bazaar-plus
 // @supportURL   https://github.com/SarcasticGeekJr/torn-bazaar-plus/issues
@@ -38,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "2.3.0"; // keep in sync with @version above
+  const VERSION = "2.4.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/torn-bazaar-plus/main/bazaar-plus.user.js";
   const W3B = "https://weav3r.dev/api/marketplace";
   const TORN = "https://api.torn.com";
@@ -73,6 +74,7 @@
     hidden: {}, // seller id -> name
     watch: {}, // item id -> { name, target }
     recent: [], // item ids
+    ntfyTopic: "", // ntfy.sh topic for phone notifications ("" = off)
   };
 
   // ---------------------------------------------------------------- storage
@@ -142,6 +144,50 @@
       await sleep(2100);
     }
     throw new Error("Torn PDA didn't return a response");
+  }
+
+  // POST, for sending notifications. Same order as GET: Torn PDA, then Tampermonkey, then fetch.
+  async function httpPost(url, body, headers = {}) {
+    if (typeof window.PDA_httpPost === "function") {
+      const r = await window.PDA_httpPost(url, headers, body);
+      if (r && r.status != null && (+r.status < 200 || +r.status >= 300)) throw new Error("HTTP " + r.status);
+      return r;
+    }
+    if (typeof GM_xmlhttpRequest === "function") {
+      return new Promise((res, rej) =>
+        GM_xmlhttpRequest({
+          method: "POST",
+          url,
+          headers,
+          data: body,
+          timeout: 15000,
+          onload: (r) => (r.status >= 200 && r.status < 300 ? res(r) : rej(new Error("HTTP " + r.status))),
+          onerror: () => rej(new Error("Network error")),
+          ontimeout: () => rej(new Error("Timed out")),
+        })
+      );
+    }
+    const r = await fetch(url, { method: "POST", headers, body });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r;
+  }
+
+  // ntfy phone notification (https://ntfy.sh). Header values must be plain ASCII, so emoji go in Tags.
+  const ntfyTopicOk = (t) => /^[A-Za-z0-9_-]{1,64}$/.test(t || "");
+  function sendNtfy(text, opts = {}) {
+    if (!ntfyTopicOk(S.ntfyTopic)) return Promise.resolve(false);
+    const headers = { Title: (opts.title || "Bazaar Plus").replace(/[^\x20-\x7E]/g, ""), Tags: opts.tags || "shopping_cart" };
+    if (opts.click) headers.Click = opts.click;
+    if (opts.priority) headers.Priority = String(opts.priority);
+    return httpPost("https://ntfy.sh/" + S.ntfyTopic, text, headers).then(
+      () => true,
+      (e) => {
+        // ntfy limits how often one address can send; try an alert once more a minute later.
+        if (!/429/.test(e.message)) return false;
+        if (opts.retry !== false) setTimeout(() => sendNtfy(text, Object.assign({}, opts, { retry: false })), 65 * 1000);
+        return "busy";
+      }
+    );
   }
 
   const memo = new Map(); // url -> { t, p, done }
@@ -1247,6 +1293,17 @@
         ${tog("alertVibrate", "Vibrate with the pop-up")}
         <button class="btn ghost" data-act="testAlert">Test alert</button>
 
+        <h3>📲 Phone notifications (ntfy)</h3>
+        <p class="muted small">Get these alerts in your phone's notification bar with the free <b>ntfy</b> app (no account).</p>
+        <ol class="small muted setup">
+          <li>Install <b>ntfy</b> from the Play Store or App Store.</li>
+          <li>In ntfy tap <b>+</b> (Subscribe to topic) and type your topic below. Leave the server as ntfy.sh.</li>
+          <li>Tap <b>Send test</b> here.</li>
+        </ol>
+        <div class="ntfyrow"><input class="ntfy" value="${esc(S.ntfyTopic)}" placeholder="your topic" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <button class="btn ghost" data-act="ntfyNew">New</button><button class="btn" data-act="ntfyTest">Send test</button></div>
+        <p class="muted small">Anyone who knows the topic name can read it, so keep the random one. Alerts are only checked while Torn is open somewhere. Your phone may pause Torn PDA in the background, so for alerts while you're away, leave Torn open in a browser on a computer. Empty = off.</p>
+
         <h3>Hidden sellers</h3>
         ${
           Object.keys(S.hidden).length
@@ -1267,6 +1324,13 @@
           <div class="upd small muted"></div>
         </div>
       </div>`;
+    $(".ntfy").addEventListener("change", (e) => {
+      const t = e.target.value.trim();
+      if (t && !ntfyTopicOk(t)) return toast("Topic: letters, numbers, - and _ only");
+      S.ntfyTopic = t;
+      save();
+      toast(t ? "Topic saved" : "Phone notifications off");
+    });
     $(".key").addEventListener("change", (e) => {
       S.apiKey = e.target.value.trim();
       save();
@@ -1449,6 +1513,26 @@
         }
         break;
       }
+      case "ntfyNew": {
+        const t = "bzp-" + Array.from(crypto.getRandomValues(new Uint8Array(8)), (x) => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join("");
+        S.ntfyTopic = t;
+        save();
+        $(".ntfy").value = t;
+        toast("New topic made. Subscribe to it in the ntfy app.");
+        break;
+      }
+      case "ntfyTest": {
+        const t = $(".ntfy").value.trim();
+        if (!ntfyTopicOk(t)) {
+          toast("Tap New to make a topic first");
+          break;
+        }
+        S.ntfyTopic = t;
+        save();
+        const ok = await sendNtfy("Test from Bazaar Plus. Alerts will arrive like this.", { tags: "white_check_mark", retry: false });
+        toast(ok === true ? "Test sent. Check the ntfy app." : ok === "busy" ? "ntfy says too many messages; try again in a few minutes." : "Couldn't send. Check your connection.");
+        break;
+      }
       case "testAlert":
         showAlert([{ key: "test", id: 206, text: "Test alert: this is how alerts look" }]);
         break;
@@ -1595,6 +1679,13 @@
       for (const a of active) now[a.key] = seen[a.key] || Date.now();
       store.set("notified", now);
       if (fresh.length && S.alertPopup) showAlert(fresh);
+      for (const a of fresh)
+        sendNtfy(a.text, {
+          title: a.mine ? "Bazaar Plus: undercut" : "Bazaar Plus: price target",
+          tags: a.mine ? "warning" : "bell",
+          priority: 4,
+          click: a.mine ? `https://www.torn.com/bazaar.php${myId ? `?userId=${myId}` : ""}#/` : `https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${a.id}`,
+        });
       updateBadge();
     } finally {
       monitoring = false;
@@ -1910,6 +2001,10 @@ details.more .list { margin-top: 6px; }
 .btn { display: inline-flex; align-items: center; justify-content: center; height: 34px; padding: 0 14px; border-radius: 10px; border: 0;
   background: var(--acc); color: #0b1a26; font-weight: 700; text-decoration: none; font-size: 14px; }
 .btn.sm { height: 30px; padding: 0 10px; font-size: 13px; }
+.setup { margin: 4px 0 6px; padding-left: 20px; }
+.ntfyrow { display: flex; gap: 6px; align-items: center; }
+.ntfyrow input { flex: 1; min-width: 0; }
+.ntfyrow .btn { flex: none; margin: 0; }
 .btn.ghost { background: var(--bg2); color: var(--text); border: 1px solid var(--line); margin: 0 6px 6px 0; }
 .link { background: none; border: 0; color: var(--acc); padding: 0; text-decoration: underline; }
 .form .blk { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }

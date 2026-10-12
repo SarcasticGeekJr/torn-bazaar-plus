@@ -33,6 +33,7 @@ A Torn userscript for buying and selling through bazaars. It shows the cheapest 
 **Tracking**
 - **Price history:** the lowest price is saved on your device each time you view an item, and every 10 minutes for watched items. You get a 7, 30 or 120-day chart plus 24h and 7d change.
 - **Watchlist with target prices.** A pop-up alert (with vibration) appears when a watched item drops to your target or you get undercut. Each alert shows once, and dismissing it shows the next one.
+- **📲 Phone notifications with ntfy** (free app, no account): ⚙ Settings → tap **New** for a private topic, subscribe to it in the ntfy app, tap **Send test**. Target and undercut alerts then also arrive in your phone's notification bar; tapping one opens the item or your bazaar. Alerts are only checked while Torn is open somewhere, so for alerts while you're away, leave Torn open in a browser on a computer.
 - **Item info:** description, effect, requirement, circulation and shop prices.
 - **Item Market badge:** on an Item Market item page, the 🛒 button shows that item's lowest bazaar price.
 

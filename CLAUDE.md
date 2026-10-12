@@ -37,6 +37,15 @@ How users receive updates:
 - Torn PDA's source is public at github.com/Manuito83/torn-pda (`userscripts/README.md`, `TornPDA_API.js`, `GMforPDA.user.js`). It also ships the **Torn API v2 OpenAPI spec** at `lib/models/api_v2/swagger/torn_v2.json`. Read these instead of guessing field names.
 - Fall back in this order: `PDA_httpGet` → `GM_xmlhttpRequest` (Tampermonkey) → `fetch`.
 
+## Notifications: use ntfy (all scripts)
+The owner wants alerts sent as phone notifications with **ntfy** (https://ntfy.sh, free app, no account). Any script that alerts the user should also push to ntfy; an in-page banner alone isn't enough.
+- Publish: `POST https://ntfy.sh/<topic>`, body = message text. Headers: `Title`, `Tags` (emoji shortcodes like `bell`, `warning`, `moneybag`), `Priority` (1-5, alerts use 4), `Click` (URL opened when tapped). Header values must be plain ASCII, so put emoji in `Tags`, not `Title`.
+- POST order: `PDA_httpPost(url, headers, body)` (Torn PDA; the Torn page CSP blocks direct requests) → `GM_xmlhttpRequest({method:"POST"})` with `@connect ntfy.sh` → `fetch`.
+- Settings: a topic box with a **New** button (random topic, because anyone who knows a topic can read it), the 3 setup steps (install ntfy → + subscribe to the topic → Send test) and a **Send test** button. Empty topic = off.
+- Anonymous ntfy.sh is rate-limited per IP (HTTP 429): retry an alert once after ~65s, and show "too many messages, try later" for a test. Tests from this cloud often hit 429 because the IP is shared; verify delivery by polling `GET https://ntfy.sh/<topic>/json?poll=1`.
+- Be honest about limits: a userscript only runs while a Torn page is open. Phones may pause Torn PDA in the background, so for alerts while away, tell users to leave Torn open in a browser on a computer.
+- Only send what's new (Bazaar Plus keeps a shared `notified` set in localStorage) so several open tabs don't notify twice.
+
 ## Data sources
 - **Bazaar listings: TornW3B (weav3r.dev)**, public, no key.
   - `GET https://weav3r.dev/api/marketplace` → `{items:[{item_id,item_name,type,market_price,lowest_price,total_bazaars,bazaar_average}]}`
